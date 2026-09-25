@@ -1,24 +1,50 @@
 /**
  * ============================================================================
  * FILE: client/src/App.jsx
- * PURPOSE: Main Application Entry & Routing Wrapper
+ * PURPOSE: Root Application Container & Navigation Shell
  * ============================================================================
  */
 
-import React from 'react';
+import React, { useEffect } from 'react';
+import { RoomProvider, useRoom } from './context/RoomContext';
+import { useMediaStream } from './hooks/useMediaStream';
+import { LobbyPage } from './pages/LobbyPage';
+import { ToastNotification } from './components/common/ToastNotification';
+
+const AppContent = () => {
+  const mediaStreamState = useMediaStream();
+  const { roomId, participants, forceMuteTrigger } = useRoom();
+
+  // Listen for host force-mute event
+  useEffect(() => {
+    if (forceMuteTrigger > 0) {
+      mediaStreamState.forceMuteAudio();
+    }
+  }, [forceMuteTrigger]);
+
+  const inCall = roomId && participants.length > 0;
+
+  return (
+    <>
+      <ToastNotification />
+      {!inCall ? (
+        <LobbyPage mediaStreamState={mediaStreamState} />
+      ) : (
+        <div className="min-h-screen bg-slate-950 text-white flex items-center justify-center p-6">
+          <div className="text-center space-y-4">
+            <h1 className="text-3xl font-bold">In Meeting: {roomId}</h1>
+            <p className="text-slate-400">Ready to build MeetingPage grid next!</p>
+          </div>
+        </div>
+      )}
+    </>
+  );
+};
 
 export default function App() {
   return (
-    <main className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-6">
-      <div className="backdrop-blur-xl bg-white/5 border border-white/10 rounded-2xl p-8 max-w-md w-full shadow-2xl text-center space-y-4">
-        <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-indigo-500/20 text-indigo-400 border border-indigo-500/30">
-          ✨
-        </div>
-        <h1 className="text-2xl font-bold tracking-tight">WebRTCMeet</h1>
-        <p className="text-slate-400 text-sm">
-          Signal server connected. Lobby & Meeting components coming up next!
-        </p>
-      </div>
-    </main>
+    <RoomProvider>
+      <AppContent />
+    </RoomProvider>
   );
 }

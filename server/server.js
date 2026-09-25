@@ -118,6 +118,22 @@ io.on('connection', (socket) => {
     }
   });
 
+  // --------------------------------------------------------------------------
+  // HOST ACTION: MUTE ALL PARTICIPANTS
+  // --------------------------------------------------------------------------
+  socket.on('host-mute-all', ({ roomId }) => {
+    const room = rooms.get(roomId);
+    // Security check: Only the active Host can mute everyone
+    if (!room || room.hostSocketId !== socket.id) {
+      console.warn(`[⚠️ WARN] Unauthorized mute-all attempt by socket: ${socket.id}`);
+      return;
+    }
+
+    console.log(`[🔇 MUTE-ALL] Host ${socket.id} triggered Mute All in room: ${roomId}`);
+    // Broadcast to all participants EXCEPT the host
+    socket.to(roomId).emit('force-mute');
+  });
+
   // 3. WebRTC Signaling Relays
   socket.on('webrtc-offer', ({ targetSocketId, offer }) => {
     console.log(`[📡 WEBRTC] Relaying Offer: ${socket.id} -> ${targetSocketId}`);
