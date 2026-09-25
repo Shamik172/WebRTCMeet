@@ -36,7 +36,10 @@ export const useMediaStream = () => {
           : true,
       };
 
+      console.log('[🎥 MEDIA] Requesting getUserMedia constraints:', constraints);
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      console.log('[🎥 MEDIA] getUserMedia granted successfully:', stream.id);
+
       setLocalStream(stream);
       setPermissionError(null);
 
@@ -49,7 +52,7 @@ export const useMediaStream = () => {
 
       return stream;
     } catch (err) {
-      console.error('Failed to get user media:', err);
+      console.error('[💥 ERROR] getUserMedia failed:', err);
       setPermissionError('Camera or Microphone access denied. Please grant permissions.');
       return null;
     }
@@ -59,6 +62,7 @@ export const useMediaStream = () => {
     getMedia();
     return () => {
       if (localStream) {
+        console.log('[🎥 MEDIA] Stopping local tracks on unmount');
         localStream.getTracks().forEach((track) => track.stop());
       }
     };
@@ -71,6 +75,7 @@ export const useMediaStream = () => {
       if (audioTrack) {
         audioTrack.enabled = !audioTrack.enabled;
         setIsAudioMuted(!audioTrack.enabled);
+        console.log(`[🎙️ AUDIO] Audio muted state: ${!audioTrack.enabled}`);
       }
     }
   }, [localStream]);
@@ -82,6 +87,7 @@ export const useMediaStream = () => {
       if (videoTrack) {
         videoTrack.enabled = !videoTrack.enabled;
         setIsVideoOff(!videoTrack.enabled);
+        console.log(`[📷 VIDEO] Video off state: ${!videoTrack.enabled}`);
       }
     }
   }, [localStream]);
