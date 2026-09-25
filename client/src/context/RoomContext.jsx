@@ -147,6 +147,15 @@ export const RoomProvider = ({ children }) => {
     });
   };
 
+  // Cancel Waiting Request and return to Lobby
+  const cancelWaitingRequest = () => {
+    if (!socketRef.current || !roomId) return;
+    console.log(`[⏳ WAITING] Cancelling waiting room request for ${roomId}`);
+    socketRef.current.emit('cancel-waiting-request', { roomId });
+    setIsWaitingApproval(false);
+    showToast('Cancelled waiting request', 'info');
+  };
+
   // Host Admits Waiting User
   const approveUser = (targetSocketId) => {
     if (!socketRef.current || !isHost) return;
@@ -204,6 +213,7 @@ export const RoomProvider = ({ children }) => {
         muteAll,
         sendMessage,
         sendReaction,
+        cancelWaitingRequest,
       }}
     >
       {children}

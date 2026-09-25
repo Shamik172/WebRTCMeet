@@ -91,6 +91,25 @@ io.on('connection', (socket) => {
     console.log(`[⏳ WAITING] ${user.name} (${socket.id}) added to waiting queue for room: ${roomId}`);
   });
 
+  // --------------------------------------------------------------------------
+  // CANCEL WAITING ROOM REQUEST
+  // --------------------------------------------------------------------------
+  socket.on('cancel-waiting-request', ({ roomId }) => {
+    if (rooms.has(roomId)) {
+      const room = rooms.get(roomId);
+      room.waitingRoom.delete(socket.id);
+      socket.leave(roomId);
+
+      // Notify host to remove user from admission list
+      if (room.hostSocketId) {
+        io.to(room.hostSocketId).emit('waiting-room-update', {
+          waitingUsers: Array.from(room.waitingRoom.values()),
+        });
+      }
+      console.log(`[⏳ WAITING] Socket ${socket.id} cancelled waiting for room: ${roomId}`);
+    }
+  });
+
   // 2. Host Admission Approval
   socket.on('approve-user', ({ roomId, targetSocketId }) => {
     const room = rooms.get(roomId);
