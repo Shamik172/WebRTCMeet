@@ -2,11 +2,6 @@
  * ============================================================================
  * FILE: client/src/App.jsx
  * PURPOSE: Root Application Container, Dynamic URL Sync, and View Routing
- * 
- * CORE RESPONSIBILITIES:
- * 1. Synchronizes active room ID with the browser address bar (?room=xxx).
- * 2. Pre-fills room code if opened via invite link.
- * 3. Switches between LobbyPage and MeetingPage seamlessly.
  * ============================================================================
  */
 
@@ -14,32 +9,30 @@ import React, { useEffect } from 'react';
 import { RoomProvider, useRoom } from './context/RoomContext';
 import { useMediaStream } from './hooks/useMediaStream';
 import { LobbyPage } from './pages/LobbyPage';
+import { MeetingPage } from './pages/MeetingPage';
 import { ToastNotification } from './components/common/ToastNotification';
 
 const AppContent = () => {
   const mediaStreamState = useMediaStream();
-  const { roomId, participants, forceMuteTrigger } = useRoom();
+  const { roomId, isWaitingApproval, forceMuteTrigger } = useRoom();
 
-  // 1. Listen for host force-mute event
+  // 1. Handle remote force mute
   useEffect(() => {
     if (forceMuteTrigger > 0) {
       mediaStreamState.forceMuteAudio();
     }
   }, [forceMuteTrigger]);
 
-  // 2. Sync URL bar with active meeting room ID
+  // 2. Sync URL bar when actively inside a room
   useEffect(() => {
-    if (roomId && participants.length > 0) {
+    if (roomId && !isWaitingApproval) {
       const newUrl = `${window.location.pathname}?room=${roomId}`;
       window.history.pushState({ path: newUrl }, '', newUrl);
-    } else {
-      // Revert URL when returning to lobby
-      window.history.pushState({}, '', window.location.pathname);
     }
-  }, [roomId, participants.length]);
+  }, [roomId, isWaitingApproval]);
 
-  // Determine view state: admitted to meeting vs staging lobby
-  const inCall = Boolean(roomId && participants.length > 0);
+  // In-Call is true ONLY when admitted into the room and NOT waiting in approval queue
+  const inCall = Boolean(roomId && !isWaitingApproval);
 
   return (
     <>
@@ -47,12 +40,7 @@ const AppContent = () => {
       {!inCall ? (
         <LobbyPage mediaStreamState={mediaStreamState} />
       ) : (
-        <div className="min-h-screen bg-slate-950 text-white flex items-center justify-center p-6">
-          <div className="text-center space-y-4">
-            <h1 className="text-3xl font-bold">Connected to: {roomId}</h1>
-            <p className="text-slate-400">Ready to build Page 2 Meeting Grid!</p>
-          </div>
-        </div>
+        <MeetingPage mediaStreamState={mediaStreamState} />
       )}
     </>
   );

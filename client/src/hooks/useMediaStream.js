@@ -50,6 +50,7 @@ export const useMediaStream = () => {
   const requestAudio = useCallback(async () => {
     try {
       console.log('[🎙️ AUDIO] Requesting microphone track...');
+      // Ask OS for audio hardware track
       const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const newAudioTrack = audioStream.getAudioTracks()[0];
 
@@ -61,6 +62,7 @@ export const useMediaStream = () => {
 
       // Add the new active audio track without touching video tracks
       streamRef.current.addTrack(newAudioTrack);
+      // Force React to re-render by instantiating a new MediaStream wrapper
       setLocalStream(new MediaStream(streamRef.current.getTracks()));
 
       setAudioAllowed(true);
@@ -93,7 +95,7 @@ export const useMediaStream = () => {
 
       // Remove existing video tracks if any
       streamRef.current.getVideoTracks().forEach((track) => {
-        track.stop();
+        track.stop();  // Releases hardware handle back to OS (webcam LED turns off)
         streamRef.current.removeTrack(track);
       });
 

@@ -4,12 +4,9 @@
  * PURPOSE: Global Meeting State & Socket.io Signaling Coordinator
  * 
  * CORE RESPONSIBILITIES:
- * 1. Manages room state: participants, host identity, waiting room queue, and active room ID.
- * 2. Connects to backend Socket.io server using VITE_SIGNALING_SERVER_URL.
- * 3. Handles Host Passcode submission for room creation and role reclamation.
- * 4. Bridges Socket.io signaling events directly to the WebRTC mesh and components.
- * 5. Provides global toast notifications for user events (joins, leaves, admissions).
- * 6. Coordinates Remote Force-Mute events triggered by the room Host.
+ * 1. Holds roomId in pending state until admission (keeps candidate in Lobby).
+ * 2. Manages room state: participants, host identity, and waiting queue.
+ * 3. Handles invalid passcode errors, room admissions, and waiting cancellations.
  * ============================================================================
  */
 
@@ -30,97 +27,110 @@ export const RoomProvider = ({ children }) => {
   const [toasts, setToasts] = useState([]);
   const [forceMuteTrigger, setForceMuteTrigger] = useState(0);
 
-  // Socket instance reference to prevent re-initialization loops
   const socketRef = useRef(null);
+  const pendingRoomRef = useRef(''); // Holds room ID during request without switching page
 
-  /**
-   * Helper: Dispatches a temporary floating UI toast alert.
-   */
   const showToast = (message, type = 'info') => {
-    const id = Date.now();
+    const id = Date.now() + Math.random();
     setToasts((prev) => [...prev, { id, message, type }]);
     setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id));
     }, 4000);
   };
 
-  // --------------------------------------------------------------------------
-  // 1. INITIALIZE SOCKET CONNECTION & REGISTER LISTENERS
-  // --------------------------------------------------------------------------
   useEffect(() => {
-    const serverUrl = import.meta.env.VITE_SIGNALING_SERVER_URL || 'http://localhost:5000';
+    const serverUrl = import.meta.env.VITE_SIGNALING_SERVER_URL;
+    // const serverUrl = 'http://localhost:5000';
     console.log('[🔌 SIGNAL] Connecting to signaling server at:', serverUrl);
 
     const newSocket = io(serverUrl, {
       transports: ['websocket', 'polling'],
+      reconnectionAttempts: 5,
     });
 
     socketRef.current = newSocket;
     setSocket(newSocket);
 
-    // Socket Event: Successfully entered room (either as Host or approved candidate)
-    newSocket.on('room-joined', ({ isHost: hostStatus, participants: roomPeers }) => {
-      console.log('[✅ JOINED] Admitted to room. Host status:', hostStatus);
+    // 1. Admitted to meeting room (Only NOW does roomId get committed)
+    newSocket.on('room-joined', ({ roomId: joinedRoomId, isHost: hostStatus, participants: roomPeers }) => {
+      console.log('[✅ JOINED] Admitted to room:', joinedRoomId, '| Host:', hostStatus);
+      setRoomId(joinedRoomId || pendingRoomRef.current);
       setIsHost(hostStatus);
-      setParticipants(roomPeers);
       setIsWaitingApproval(false);
-      showToast(hostStatus ? '👑 You are the Host' : '👋 Joined the meeting', 'success');
+      setParticipants(roomPeers || []);
+      showToast(hostStatus ? '👑 You are the Host' : '👋 Admitted to the meeting', hostStatus ? 'host' : 'success');
     });
 
-    // Socket Event: User routed to waiting queue
+    // 2. Placed in Waiting Queue (Stays in Lobby!)
     newSocket.on('waiting-approval', () => {
-      console.log('[⏳ WAITING] Placed in waiting queue. Awaiting host admission.');
+      console.log('[⏳ WAITING] Placed in waiting queue. Remaining in lobby.');
       setIsWaitingApproval(true);
-      showToast('⏳ Waiting for host to admit you...', 'warning');
+      showToast('Waiting for the host to admit you...', 'warning');
     });
 
-    // Socket Event: Host receives updated waiting list
+    // 3. Rejected due to wrong Host Passcode
+    newSocket.on('invalid-host-passcode', ({ message }) => {
+      console.warn('[❌ REJECT] Invalid host key provided');
+      setIsWaitingApproval(false);
+      showToast(message || 'Incorrect Host Key. Please try again.', 'error');
+    });
+
+    // 4. Host receives updated waiting list
     newSocket.on('waiting-room-update', ({ waitingUsers: queue }) => {
-      console.log('[👥 WAITING-LIST] Updated waiting queue length:', queue.length);
-      setWaitingUsers(queue);
+      console.log('[👥 WAITING-LIST] Updated queue count:', queue?.length || 0);
+      setWaitingUsers(queue || []);
     });
 
-    // Socket Event: New user entered the active call
+    // 5. Remote user joined
     newSocket.on('user-joined', ({ user }) => {
-      console.log('[👋 PEER] User joined room:', user.name);
-      setParticipants((prev) => [...prev.filter((p) => p.socketId !== user.socketId), user]);
-      showToast(`${user.name} joined the meeting`);
+      console.log('[👋 PEER] Remote user joined:', user?.name);
+      setParticipants((prev) => {
+        const uid = user.socketId || user.id || user.peerId;
+        if (prev.some((p) => (p.socketId || p.id || p.peerId) === uid)) return prev;
+        return [...prev, user];
+      });
+      showToast(`${user?.name || 'Someone'} joined the meeting`, 'info');
     });
 
-    // Socket Event: User left the room
+    // 6. Remote user left
     newSocket.on('user-left', ({ socketId }) => {
-      console.log('[🚪 LEFT] User left room:', socketId);
-      setParticipants((prev) => prev.filter((p) => p.socketId !== socketId));
-      setWaitingUsers((prev) => prev.filter((u) => u.socketId !== socketId));
-      showToast('A participant left the meeting');
+      console.log('[🚪 LEFT] User disconnected:', socketId);
+      setParticipants((prev) => prev.filter((p) => (p.socketId || p.id || p.peerId) !== socketId));
+      setWaitingUsers((prev) => prev.filter((u) => (u.socketId || u.id || u.peerId) !== socketId));
+      showToast('A participant left the meeting', 'info');
     });
 
-    // Socket Event: Host role was reassigned
+    // 7. Host changed
     newSocket.on('host-changed', ({ newHostId }) => {
       console.log('[👑 HOST] Host changed to socket:', newHostId);
-      setIsHost(newSocket.id === newHostId);
+      const isNewHost = newSocket.id === newHostId;
+      setIsHost(isNewHost);
       setParticipants((prev) =>
         prev.map((p) => ({
           ...p,
-          isHost: p.socketId === newHostId,
+          isHost: (p.socketId || p.id || p.peerId) === newHostId,
         }))
       );
-      if (newSocket.id === newHostId) {
-        showToast('👑 You are now the host', 'warning');
+      if (isNewHost) {
+        showToast('👑 You are now the meeting Host', 'host');
       }
     });
 
-    // Socket Event: Host remotely muted all participants
+    // 8. Remote Force Mute
     newSocket.on('force-mute', () => {
       console.log('[🔇 FORCE-MUTE] Received remote mute instruction from Host');
       setForceMuteTrigger((prev) => prev + 1);
-      showToast('The host muted everyone', 'warning');
+      showToast('The Host muted all participants', 'mute');
     });
 
-    // Socket Event: In-call Chat Message received
+    // 9. Chat Message
     newSocket.on('receive-message', (message) => {
-      console.log('[💬 CHAT] Message received from:', message.senderName);
       setMessages((prev) => [...prev, message]);
+    });
+
+    // 10. Reactions
+    newSocket.on('receive-reaction', (data) => {
+      console.log('[✨ REACTION] Received reaction:', data.emoji);
     });
 
     return () => {
@@ -129,17 +139,13 @@ export const RoomProvider = ({ children }) => {
     };
   }, []);
 
-  // --------------------------------------------------------------------------
-  // ACTIONS: Helper methods exposed to UI components
-  // --------------------------------------------------------------------------
-
-  // Join Room with optional Host Passcode
+  // Action: Request entry into room
   const joinRoom = ({ roomCode, user, hostPasscode = '' }) => {
     if (!socketRef.current) return;
-    setRoomId(roomCode);
+    pendingRoomRef.current = roomCode;
     setCurrentUser(user);
 
-    console.log(`[🔌 SIGNAL] Emitting join-room-request for room: ${roomCode}`);
+    console.log(`[🔌 SIGNAL] Emitting join-room-request for: ${roomCode}`);
     socketRef.current.emit('join-room-request', {
       roomId: roomCode,
       user,
@@ -147,50 +153,45 @@ export const RoomProvider = ({ children }) => {
     });
   };
 
-  // Cancel Waiting Request and return to Lobby
+  // Action: Cancel waiting request and return to interactive lobby form
   const cancelWaitingRequest = () => {
-    if (!socketRef.current || !roomId) return;
-    console.log(`[⏳ WAITING] Cancelling waiting room request for ${roomId}`);
-    socketRef.current.emit('cancel-waiting-request', { roomId });
+    if (!socketRef.current) return;
+    const roomParam = new URLSearchParams(window.location.search).get('room');
+    const targetRoom = pendingRoomRef.current || roomId || roomParam;
+
+    console.log(`[⏳ WAITING] Cancelling waiting request for room: ${targetRoom}`);
+    socketRef.current.emit('cancel-waiting-request', { roomId: targetRoom });
     setIsWaitingApproval(false);
-    showToast('Cancelled waiting request', 'info');
+    pendingRoomRef.current = '';
+    showToast('Cancelled waiting request. You can now enter host key.', 'info');
   };
 
-  // Host Admits Waiting User
+  // Action: Host admits waiting candidate
   const approveUser = (targetSocketId) => {
-    if (!socketRef.current || !isHost) return;
+    if (!socketRef.current || !roomId || !isHost) return;
     console.log(`[👑 HOST] Approving user socket: ${targetSocketId}`);
-    socketRef.current.emit('approve-user', {
-      roomId,
-      targetSocketId,
-    });
+    socketRef.current.emit('approve-user', { roomId, targetSocketId });
   };
 
-  // Host Mutes Everyone in the Call
+  // Action: Host mutes all
   const muteAll = () => {
-    if (!socketRef.current || !isHost) return;
-    console.log('[👑 HOST] Broadcasting host-mute-all command');
+    if (!socketRef.current || !roomId || !isHost) return;
     socketRef.current.emit('host-mute-all', { roomId });
-    showToast('You muted everyone in the meeting', 'info');
+    showToast('You muted everyone in the meeting', 'mute');
   };
 
-  // Send In-Call Chat Message
+  // Action: Send chat
   const sendMessage = (text) => {
-    if (!socketRef.current || !text.trim() || !currentUser) return;
-    console.log('[💬 CHAT] Sending text message to room:', roomId);
+    if (!socketRef.current || !roomId || !text.trim() || !currentUser) return;
     socketRef.current.emit('send-message', {
       roomId,
-      message: {
-        senderName: currentUser.name,
-        text,
-      },
+      message: { senderName: currentUser.name, text },
     });
   };
 
-  // Broadcast Animated Reaction Emoji
+  // Action: Send reaction
   const sendReaction = (emoji) => {
-    if (!socketRef.current) return;
-    console.log('[✨ REACTION] Sending emoji reaction:', emoji);
+    if (!socketRef.current || !roomId) return;
     socketRef.current.emit('send-reaction', { roomId, emoji });
   };
 
@@ -209,11 +210,11 @@ export const RoomProvider = ({ children }) => {
         forceMuteTrigger,
         showToast,
         joinRoom,
+        cancelWaitingRequest,
         approveUser,
         muteAll,
         sendMessage,
         sendReaction,
-        cancelWaitingRequest,
       }}
     >
       {children}

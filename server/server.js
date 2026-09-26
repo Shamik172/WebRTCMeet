@@ -8,7 +8,8 @@
  * 2. Host Key Validation: Validates passcodes so original organizers bypass waiting
  *    rooms and reclaim host controls.
  * 3. WebRTC Relays: Mailbox forwarding for SDP offers, answers, and ICE candidates.
- * 4. Disconnect Handling: Prevents non-host candidates from getting admin rights.
+ * 4. Waiting Room Enforcement: Holds candidates without keys in queue until host arrives.
+ * 5. Disconnect Handling: Prevents non-host candidates from getting admin rights.
  * ============================================================================
  */
 
@@ -36,50 +37,122 @@ io.on('connection', (socket) => {
 
   // 1. Join Room Request
   socket.on('join-room-request', ({ roomId, user, hostPasscode }) => {
-    socket.join(roomId);
+    console.log(`[🔌 SIGNAL] join-room-request from ${socket.id} (${user?.name}) for room: ${roomId}`);
 
-    // Case A: Room doesn't exist yet -> First user becomes Host
+    const trimmedKey = hostPasscode ? hostPasscode.trim() : '';
+    const hasProvidedKey = trimmedKey.length > 0;
+
+    // ------------------------------------------------------------------------
+    // CASE A: ROOM DOES NOT EXIST YET
+    // ------------------------------------------------------------------------
     if (!rooms.has(roomId)) {
-      rooms.set(roomId, {
-        hostPasscode: hostPasscode || '1234',
-        hostSocketId: socket.id,
-        participants: new Map([[socket.id, { ...user, socketId: socket.id, isHost: true }]]),
-        waitingRoom: new Map(),
-      });
+      if (hasProvidedKey) {
+        // Organizer creates room with their specified key
+        const hostData = {
+          ...user,
+          id: socket.id,
+          socketId: socket.id,
+          peerId: socket.id,
+          isHost: true,
+        };
 
-      socket.emit('room-joined', {
-        isHost: true,
-        participants: Array.from(rooms.get(roomId).participants.values()),
-      });
+        rooms.set(roomId, {
+          hostPasscode: trimmedKey,
+          hostSocketId: socket.id,
+          participants: new Map([[socket.id, hostData]]),
+          waitingRoom: new Map(),
+        });
 
-      console.log(`[👑 HOST] Room created: ${roomId} | Host: ${user.name} (${socket.id})`);
-      return;
+        socket.join(roomId);
+        socket.emit('room-joined', {
+          roomId,
+          isHost: true,
+          participants: [hostData],
+        });
+
+        console.log(`[👑 HOST] Room ${roomId} created by HOST: ${user?.name} (${socket.id})`);
+        return;
+      } else {
+        // Regular participant arrived before any host -> Hold in waiting room
+        const waitingData = {
+          ...user,
+          id: socket.id,
+          socketId: socket.id,
+          peerId: socket.id,
+        };
+
+        rooms.set(roomId, {
+          hostPasscode: '1234', // Default key until host arrives
+          hostSocketId: null,
+          participants: new Map(),
+          waitingRoom: new Map([[socket.id, waitingData]]),
+        });
+
+        socket.emit('waiting-approval');
+        console.log(`[⏳ WAITING] ${user?.name} (${socket.id}) queued. Room ${roomId} has no active host yet.`);
+        return;
+      }
     }
 
     const room = rooms.get(roomId);
 
-    // Case B: User enters with the valid Host Passcode -> Reclaim Host Role
-    const isAuthenticHost = hostPasscode && hostPasscode === room.hostPasscode;
+    // ------------------------------------------------------------------------
+    // CASE B: USER SUPPLIED A KEY -> VALIDATE IT
+    // ------------------------------------------------------------------------
+    if (hasProvidedKey) {
+      if (trimmedKey === room.hostPasscode) {
+        // Correct key: Admit directly as Host / Co-Host
+        const isAnchor = !room.hostSocketId;
+        if (isAnchor) room.hostSocketId = socket.id; // <-- The host claims the seat!
 
-    if (isAuthenticHost) {
-      room.hostSocketId = socket.id;
-      room.participants.set(socket.id, { ...user, socketId: socket.id, isHost: true });
+        const participantData = {
+          ...user,
+          id: socket.id,
+          socketId: socket.id,
+          peerId: socket.id,
+          isHost: true,
+        };
 
-      socket.emit('room-joined', {
-        isHost: true,
-        participants: Array.from(room.participants.values()),
-      });
+        room.participants.set(socket.id, participantData);
+        socket.join(roomId);
 
-      // Broadcast new peer to active room and announce host update
-      socket.to(roomId).emit('user-joined', { user: { ...user, socketId: socket.id, isHost: true } });
-      io.to(roomId).emit('host-changed', { newHostId: socket.id });
+        socket.emit('room-joined', {
+          roomId,
+          isHost: true,
+          participants: Array.from(room.participants.values()),
+        });
 
-      console.log(`[👑 HOST] Host reclaimed by: ${user.name} (${socket.id}) in room: ${roomId}`);
-      return;
+        // Send existing waiting room queue to the host
+        socket.emit('waiting-room-update', {
+          waitingUsers: Array.from(room.waitingRoom.values()),
+        });
+
+        socket.to(roomId).emit('user-joined', { user: participantData });
+        io.to(roomId).emit('host-changed', { newHostId: socket.id });
+
+        console.log(`[👑 HOST] Host/Co-host admitted by key: ${user?.name} (${socket.id}) in ${roomId}`);
+        return;
+      } else {
+        // Explicitly WRONG key: Reject immediately, do NOT dump into waiting room
+        socket.emit('invalid-host-passcode', {
+          message: 'Incorrect Host Key. Please re-check the 4-digit key or join as a participant.',
+        });
+        console.log(`[❌ REJECT] Wrong host passcode attempted by ${user?.name} (${socket.id}) in ${roomId}`);
+        return;
+      }
     }
 
-    // Case C: Standard Participant / Candidate -> Routed to Waiting Room
-    room.waitingRoom.set(socket.id, { ...user, socketId: socket.id });
+    // ------------------------------------------------------------------------
+    // CASE C: STANDARD PARTICIPANT (NO KEY) -> QUEUE IN WAITING ROOM
+    // ------------------------------------------------------------------------
+    const candidateData = {
+      ...user,
+      id: socket.id,
+      socketId: socket.id,
+      peerId: socket.id,
+    };
+
+    room.waitingRoom.set(socket.id, candidateData);
 
     if (room.hostSocketId) {
       io.to(room.hostSocketId).emit('waiting-room-update', {
@@ -88,7 +161,7 @@ io.on('connection', (socket) => {
     }
 
     socket.emit('waiting-approval');
-    console.log(`[⏳ WAITING] ${user.name} (${socket.id}) added to waiting queue for room: ${roomId}`);
+    console.log(`[⏳ WAITING] ${user?.name} (${socket.id}) queued in waiting room for ${roomId}`);
   });
 
   // --------------------------------------------------------------------------
@@ -100,7 +173,6 @@ io.on('connection', (socket) => {
       room.waitingRoom.delete(socket.id);
       socket.leave(roomId);
 
-      // Notify host to remove user from admission list
       if (room.hostSocketId) {
         io.to(room.hostSocketId).emit('waiting-room-update', {
           waitingUsers: Array.from(room.waitingRoom.values()),
@@ -117,23 +189,42 @@ io.on('connection', (socket) => {
       console.warn(`[⚠️ WARN] Unauthorized approval attempt by socket: ${socket.id}`);
       return;
     }
-
+    
+    // suppose Bob is a normal participant in waiting queue and host approved him
+    // Move Bob from waitingRoom Map to participants Map
     const user = room.waitingRoom.get(targetSocketId);
     if (user) {
       room.waitingRoom.delete(targetSocketId);
-      room.participants.set(targetSocketId, { ...user, isHost: false });
+      const approvedParticipant = {
+        ...user,
+        id: targetSocketId,
+        socketId: targetSocketId,
+        peerId: targetSocketId,
+        isHost: false,
+      };
+      room.participants.set(targetSocketId, approvedParticipant);
 
+      // Put Bob's socket into Socket.io room channel
+      const targetSocket = io.sockets.sockets.get(targetSocketId);
+      if (targetSocket) {
+        targetSocket.join(roomId);
+      }
+
+      // Notify Host with the updated waiting queue
       io.to(room.hostSocketId).emit('waiting-room-update', {
         waitingUsers: Array.from(room.waitingRoom.values()),
       });
-
+      
+      // Send admission token to Bob
       io.to(targetSocketId).emit('room-joined', {
+        roomId,
         isHost: false,
         participants: Array.from(room.participants.values()),
       });
 
-      socket.to(roomId).emit('user-joined', { user: { ...user, isHost: false } });
-      console.log(`[✅ ADMIT] User ${user.name} (${targetSocketId}) admitted by host`);
+      // Notify everyone else already inside the room
+      socket.to(roomId).emit('user-joined', { user: approvedParticipant });
+      console.log(`[✅ ADMIT] User ${user.name} (${targetSocketId}) admitted by host into ${roomId}`);
     }
   });
 
@@ -142,14 +233,12 @@ io.on('connection', (socket) => {
   // --------------------------------------------------------------------------
   socket.on('host-mute-all', ({ roomId }) => {
     const room = rooms.get(roomId);
-    // Security check: Only the active Host can mute everyone
     if (!room || room.hostSocketId !== socket.id) {
       console.warn(`[⚠️ WARN] Unauthorized mute-all attempt by socket: ${socket.id}`);
       return;
     }
 
     console.log(`[🔇 MUTE-ALL] Host ${socket.id} triggered Mute All in room: ${roomId}`);
-    // Broadcast to all participants EXCEPT the host
     socket.to(roomId).emit('force-mute');
   });
 
@@ -222,6 +311,16 @@ io.on('connection', (socket) => {
     console.log(`[🔌 SIGNAL] Socket disconnected: ${socket.id}`);
   });
 });
+
+// 6. Periodic Memory Housekeeping (Every 30 Minutes)
+setInterval(() => {
+  for (const [roomId, room] of rooms.entries()) {
+    if (room.participants.size === 0 && room.waitingRoom.size === 0) {
+      rooms.delete(roomId);
+      console.log(`[🧹 TTL-PURGE] Cleaned up unused room: ${roomId}`);
+    }
+  }
+}, 30 * 60 * 1000);
 
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
