@@ -4,10 +4,11 @@
  * PURPOSE: Full In-Call Meeting View (VisionOS Glassmorphism)
  * 
  * CORE RESPONSIBILITIES:
- * 1. Calls useWebRTCMesh(socket, localStream) with exact original positional arguments.
- * 2. Bridges incoming socket signaling events to hook handlers (offer, answer, candidate).
- * 3. Builds remote peer tiles directly from RoomContext participants + remoteStreams Map.
- * 4. Filters out local participant to prevent ghost/duplicate tiles.
+ * 1. Calls original useWebRTCMesh(socket, localStream) without breaking its signature.
+ * 2. Bridges incoming socket signaling events directly to mesh hook handlers.
+ * 3. Builds remote peer tiles from RoomContext participants + remoteStreams Map.
+ * 4. Mounts MeetingGrid, ControlDock, ChatDrawer, ParticipantsDrawer, and ReactionOverlay.
+ * 5. Isolates grid viewport space to prevent overlap with the bottom floating dock.
  * ============================================================================
  */
 
@@ -17,6 +18,9 @@ import { useWebRTCMesh } from '../hooks/useWebRTCMesh';
 import { useScreenShare } from '../hooks/useScreenShare';
 import { MeetingGrid } from '../components/meeting/MeetingGrid';
 import { ControlDock } from '../components/meeting/ControlDock';
+import { ChatDrawer } from '../components/meeting/ChatDrawer';
+import { ParticipantsDrawer } from '../components/meeting/ParticipantsDrawer';
+import { ReactionOverlay } from '../components/meeting/ReactionOverlay';
 import { Radio, Users, Check } from 'lucide-react';
 
 export const MeetingPage = ({ mediaStreamState }) => {
@@ -45,17 +49,17 @@ export const MeetingPage = ({ mediaStreamState }) => {
     showToast,
   } = useRoom();
 
-  const [activePanel, setActivePanel] = useState(null);
+  const [activePanel, setActivePanel] = useState(null); // 'chat' | 'people' | null
   const [unreadCount, setUnreadCount] = useState(0);
 
-  // 1. Broadcast mic & cam hardware toggles to remote peers
+  // 1. Broadcast mic & cam hardware changes to remote peers
   useEffect(() => {
     if (broadcastMediaState) {
       broadcastMediaState(isAudioMuted, isVideoOff);
     }
   }, [isAudioMuted, isVideoOff, broadcastMediaState]);
 
-  // 2. Call your original useWebRTCMesh with exact positional arguments (socket, localStream)
+  // 2. Call original useWebRTCMesh with positional arguments
   const {
     remoteStreams,
     peerConnectionsRef,
@@ -66,7 +70,7 @@ export const MeetingPage = ({ mediaStreamState }) => {
     removePeer,
   } = useWebRTCMesh(socket, localStream);
 
-  // 3. Connect socket signaling events directly to your hook's handlers
+  // 3. Connect socket signaling events to hook handlers
   useEffect(() => {
     if (!socket) return;
 
@@ -109,7 +113,7 @@ export const MeetingPage = ({ mediaStreamState }) => {
     };
   }, [socket, initiateCall, handleOffer, handleAnswer, handleIceCandidate, removePeer]);
 
-  // 4. Hot-swap video track across peer connections for Screen Sharing
+  // 4. Hot-swap video track for screen presentation across active mesh connections
   const handleTrackReplace = (newTrack) => {
     if (!peerConnectionsRef?.current) return;
     Object.values(peerConnectionsRef.current).forEach((pc) => {
@@ -133,7 +137,7 @@ export const MeetingPage = ({ mediaStreamState }) => {
     if (panelName === 'chat') setUnreadCount(0);
   };
 
-  // 5. Build remote peer tiles from RoomContext participants + remoteStreams Map
+  // 5. Build remote peer list from RoomContext participants + remoteStreams Map
   const myId = socket?.id;
   const safeParticipants = Array.isArray(participants) ? participants : [];
 
@@ -144,7 +148,6 @@ export const MeetingPage = ({ mediaStreamState }) => {
     })
     .map((peer) => {
       const pId = peer.socketId || peer.id || peer.peerId;
-      // Extract stream from the Map returned by your hook:
       const stream = remoteStreams instanceof Map ? remoteStreams.get(pId) : null;
 
       return {
@@ -167,7 +170,7 @@ export const MeetingPage = ({ mediaStreamState }) => {
         <div className="absolute bottom-1/4 right-1/4 w-[450px] h-[350px] bg-emerald-500/10 rounded-full blur-[150px]" />
       </div>
 
-      {/* Header Bar */}
+      {/* Top Header Bar */}
       <header className="relative z-20 w-full shrink-0 px-4 sm:px-6 py-2.5 sm:py-3 flex items-center justify-between">
         <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-950/60 backdrop-blur-xl border border-white/10 shadow-lg">
           <div className="w-6 h-6 rounded-lg bg-cyan-400/15 border border-cyan-400/30 flex items-center justify-center text-cyan-400">
@@ -207,7 +210,7 @@ export const MeetingPage = ({ mediaStreamState }) => {
         />
       </main>
 
-      {/* Control Dock */}
+      {/* Floating Control Dock */}
       <ControlDock
         isAudioMuted={isAudioMuted}
         isVideoOff={isVideoOff}
@@ -225,6 +228,21 @@ export const MeetingPage = ({ mediaStreamState }) => {
         onMuteAll={muteAll}
         onLeaveCall={leaveCall || (() => { window.location.href = window.location.pathname; })}
       />
+
+      {/* In-Call Drawers & Floating Overlays */}
+      <ChatDrawer
+        isOpen={activePanel === 'chat'}
+        onClose={() => setActivePanel(null)}
+      />
+
+      <ParticipantsDrawer
+        isOpen={activePanel === 'people'}
+        onClose={() => setActivePanel(null)}
+        peers={remotePeers}
+      />
+
+      <ReactionOverlay />
+
     </div>
   );
 };
