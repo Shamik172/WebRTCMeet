@@ -22,10 +22,9 @@ export const ReactionOverlay = () => {
 
     const handleReaction = ({ emoji, senderSocketId }) => {
       const id = Date.now() + Math.random();
-      const left = Math.floor(15 + Math.random() * 70); // Spread across screen (15% - 85%)
-      const drift = (Math.random() - 0.5) * 60; // Horizontal drift in px
+      const left = Math.floor(20 + Math.random() * 60); // Random horizon spread (20% - 80%)
 
-      setActiveReactions((prev) => [...prev, { id, emoji, left, drift }]);
+      setActiveReactions((prev) => [...prev, { id, emoji, left }]);
 
       // Remove after floating animation finishes (2.5s)
       setTimeout(() => {
@@ -42,33 +41,27 @@ export const ReactionOverlay = () => {
       {activeReactions.map((r) => (
         <span
           key={r.id}
-          style={{ 
-            left: `${r.left}%`,
-            '--drift': `${r.drift}px`,
-          }}
-          className="absolute bottom-20 text-3xl sm:text-5xl select-none animate-[reactionFloat_2.5s_cubic-bezier(0.22,1,0.36,1)_forwards] drop-shadow-[0_10px_20px_rgba(0,0,0,0.5)] filter"
+          style={{ left: `${r.left}%` }}
+          className="absolute bottom-16 text-3xl sm:text-4xl animate-[floatUp_2.5s_ease-out_forwards]"
         >
           {r.emoji}
         </span>
       ))}
       <style>{`
-        @keyframes reactionFloat {
+        @keyframes floatUp {
           0% {
-            transform: translateY(0) translateX(0) scale(0.4);
+            transform: translateY(0) scale(0.6);
             opacity: 0;
           }
           15% {
             opacity: 1;
-            transform: translateY(-30px) translateX(calc(var(--drift) * 0.2)) scale(1.25);
-          }
-          40% {
-            transform: translateY(-120px) translateX(var(--drift)) scale(1);
+            transform: translateY(-20px) scale(1.2);
           }
           80% {
             opacity: 0.9;
           }
           100% {
-            transform: translateY(-70vh) translateX(calc(var(--drift) * 1.5)) scale(1.15);
+            transform: translateY(-380px) scale(1.4);
             opacity: 0;
           }
         }

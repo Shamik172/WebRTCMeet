@@ -5,7 +5,7 @@
  * 
  * CORE RESPONSIBILITIES:
  * 1. Coordinates room state: participants, roles (Host/Co-Host/Attendee), and queues.
- * 2. Connects to the local signaling server at http://localhost:5000 (Render URL preserved).
+ * 2. Connects to the local signaling server at http://localhost:5000.
  * 3. Bridges WebRTC offer, answer, and ICE candidate events across clients.
  * 4. Manages lobby waiting room rejection, admission, and cancel requests.
  * 5. Provides global toast notifications, remote force-mute directives, and media-state sync.
@@ -31,7 +31,7 @@ export const RoomProvider = ({ children }) => {
   const [forceMuteTrigger, setForceMuteTrigger] = useState(0);
 
   const socketRef = useRef(null);
-  const pendingRoomRef = useRef(''); // Holds room ID during request without switching page early
+  const pendingRoomRef = useRef('');
 
   // Floating toast notification dispatcher
   const showToast = (message, type = 'info') => {
@@ -58,7 +58,7 @@ export const RoomProvider = ({ children }) => {
     socketRef.current = newSocket;
     setSocket(newSocket);
 
-    // 1. Admission confirmation (Lobby -> Meeting Page transition)
+    // 1. Admission confirmation
     newSocket.on('room-joined', ({ roomId: joinedRoomId, isHost: hostStatus, isCoHost: coHostStatus, participants: roomPeers }) => {
       console.log(`[✅ JOINED] Admitted to room: ${joinedRoomId} | Host: ${hostStatus} | CoHost: ${coHostStatus}`);
       setRoomId(joinedRoomId || pendingRoomRef.current);
@@ -78,20 +78,34 @@ export const RoomProvider = ({ children }) => {
       showToast('Waiting for the host to admit you to the room...', 'warning');
     });
 
-    // 3. Invalid passcode rejection
+    // 3. Candidate was explicitly declined by host
+    newSocket.on('waiting-rejected', ({ message }) => {
+      console.warn('[🚫 DECLINED] Host declined waiting room request');
+      setIsWaitingApproval(false);
+      pendingRoomRef.current = '';
+      showToast(message || 'The host declined your request to join.', 'error');
+    });
+
+    // 4. Invalid passcode rejection
     newSocket.on('invalid-host-passcode', ({ message }) => {
       console.warn('[❌ REJECT] Invalid host key provided');
       setIsWaitingApproval(false);
       showToast(message || 'Incorrect Host Key. Please try again.', 'error');
     });
 
-    // 4. Host waiting room list updates
+    // 5. Host waiting room list updates (Toast alert on new entrant)
     newSocket.on('waiting-room-update', ({ waitingUsers: queue }) => {
       console.log('[👥 WAITING-LIST] Updated queue count:', queue?.length || 0);
-      setWaitingUsers(queue || []);
+      setWaitingUsers((prev) => {
+        if (queue && queue.length > prev.length) {
+          const newest = queue[queue.length - 1];
+          showToast(`🔔 ${newest?.name || 'Someone'} is waiting to join`, 'warning');
+        }
+        return queue || [];
+      });
     });
 
-    // 5. Remote peer joined
+    // 6. Remote peer joined
     newSocket.on('user-joined', ({ user }) => {
       console.log('[👋 PEER] Remote user joined:', user?.name);
       setParticipants((prev) => {
@@ -102,7 +116,7 @@ export const RoomProvider = ({ children }) => {
       showToast(`${user?.name || 'Someone'} joined the meeting`, 'info');
     });
 
-    // 6. Remote peer left
+    // 7. Remote peer left
     newSocket.on('user-left', ({ socketId }) => {
       console.log('[🚪 LEFT] User disconnected:', socketId);
       setParticipants((prev) => prev.filter((p) => (p.socketId || p.id || p.peerId) !== socketId));
@@ -110,11 +124,12 @@ export const RoomProvider = ({ children }) => {
       showToast('A participant left the meeting', 'info');
     });
 
-    // 7. Host role migration
+    // 8. Host role migration
     newSocket.on('host-changed', ({ newHostId }) => {
-      console.log('[👑 HOST] Host changed to socket:', newHostId);
+      console.log('[👑 HOST] Primary host changed to socket:', newHostId);
       const isNewHost = newSocket.id === newHostId;
       setIsHost(isNewHost);
+      if (isNewHost) setIsCoHost(false);
       setParticipants((prev) =>
         prev.map((p) => ({
           ...p,
@@ -124,14 +139,14 @@ export const RoomProvider = ({ children }) => {
       if (isNewHost) showToast('👑 You are now the meeting Host', 'host');
     });
 
-    // 8. Remote media mute from Host
+    // 9. Remote media mute from Host
     newSocket.on('force-mute', () => {
       console.log('[🔇 FORCE-MUTE] Received remote mute instruction from Host');
       setForceMuteTrigger((prev) => prev + 1);
       showToast('The Host muted all participants', 'mute');
     });
 
-    // 9. Remote peer mic/video hardware toggle sync
+    // 10. Remote peer mic/video hardware toggle sync
     newSocket.on('peer-media-state', ({ socketId, isAudioMuted, isVideoOff }) => {
       setParticipants((prev) =>
         prev.map((p) => {
@@ -143,18 +158,17 @@ export const RoomProvider = ({ children }) => {
       );
     });
 
-    // 10. In-call chat messages
+    // 11. In-call chat messages
     newSocket.on('receive-message', (message) => {
       console.log('[💬 CHAT] Message received from:', message.senderName);
       setMessages((prev) => [...prev, message]);
     });
 
-    // 11. Reaction animations
+    // 12. Reaction animations
     newSocket.on('receive-reaction', (data) => {
       console.log('[✨ REACTION] Emitted reaction received:', data?.emoji);
     });
 
-    // 12. Cleanup on unmount
     return () => {
       console.log('[🔌 SIGNAL] Disconnecting socket...');
       newSocket.disconnect();
@@ -165,7 +179,6 @@ export const RoomProvider = ({ children }) => {
   // CONTEXT ACTIONS & DISPATCHERS
   // --------------------------------------------------------------------------
 
-  // Join or request room entry
   const joinRoom = ({ roomCode, user, hostPasscode = '' }) => {
     if (!socketRef.current) return;
     pendingRoomRef.current = roomCode;
@@ -179,7 +192,6 @@ export const RoomProvider = ({ children }) => {
     });
   };
 
-  // Cancel waiting room request from lobby
   const cancelWaitingRequest = () => {
     if (!socketRef.current) return;
     const roomParam = new URLSearchParams(window.location.search).get('room');
@@ -199,7 +211,13 @@ export const RoomProvider = ({ children }) => {
     socketRef.current.emit('approve-user', { roomId, targetSocketId });
   };
 
-  // Host/Co-Host mutes all participants
+  // Host/Co-Host rejects waiting attendee
+  const rejectUser = (targetSocketId) => {
+    if (!socketRef.current || !roomId || (!isHost && !isCoHost)) return;
+    console.log(`[🚫 DECLINE] Rejecting user socket: ${targetSocketId}`);
+    socketRef.current.emit('reject-user', { roomId, targetSocketId });
+  };
+
   const muteAll = () => {
     if (!socketRef.current || !roomId || (!isHost && !isCoHost)) return;
     console.log('[👑 HOST] Broadcasting host-mute-all command');
@@ -207,13 +225,11 @@ export const RoomProvider = ({ children }) => {
     showToast('You muted everyone in the meeting', 'mute');
   };
 
-  // Broadcast mic/camera hardware toggle states
   const broadcastMediaState = (isAudioMuted, isVideoOff) => {
     if (!socketRef.current || !roomId) return;
     socketRef.current.emit('media-state-change', { roomId, isAudioMuted, isVideoOff });
   };
 
-  // Immediate departure teardown
   const leaveCall = () => {
     if (socketRef.current && roomId) {
       console.log(`[🚪 LEAVE] Leaving active call in room: ${roomId}`);
@@ -222,7 +238,6 @@ export const RoomProvider = ({ children }) => {
     window.location.href = window.location.pathname;
   };
 
-  // In-call text messaging
   const sendMessage = (text) => {
     if (!socketRef.current || !roomId || !text.trim() || !currentUser) return;
     console.log('[💬 CHAT] Sending message to room:', roomId);
@@ -232,7 +247,6 @@ export const RoomProvider = ({ children }) => {
     });
   };
 
-  // Broadcast floating emoji reaction
   const sendReaction = (emoji) => {
     if (!socketRef.current || !roomId) return;
     console.log('[✨ REACTION] Emitting reaction:', emoji);
@@ -257,6 +271,7 @@ export const RoomProvider = ({ children }) => {
         joinRoom,
         cancelWaitingRequest,
         approveUser,
+        rejectUser,
         muteAll,
         broadcastMediaState,
         leaveCall,

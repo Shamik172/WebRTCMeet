@@ -12,7 +12,7 @@
  */
 
 import React, { useRef, useEffect } from 'react';
-import { Mic, MicOff, Crown, Shield } from 'lucide-react';
+import { Mic, MicOff, Crown, Shield, User } from 'lucide-react';
 
 export const ParticipantTile = ({
   peerId,
@@ -105,6 +105,12 @@ export const ParticipantTile = ({
               <div className="px-1.5 sm:px-2 py-0.5 rounded-lg bg-cyan-500/20 border border-cyan-500/40 text-cyan-300 flex items-center gap-1 text-[9px] sm:text-[10px] font-semibold backdrop-blur-xl shadow-sm">
                 <Shield className="w-2.5 sm:w-3 h-2.5 sm:h-3 text-cyan-400" />
                 <span>Co-Host</span>
+              </div>
+            )}
+            {!isHost && !isCoHost && (
+              <div className="px-1.5 sm:px-2 py-0.5 rounded-lg bg-white/[0.06] border border-white/10 text-slate-300 flex items-center gap-1 text-[9px] sm:text-[10px] font-medium backdrop-blur-xl shadow-sm">
+                <User className="w-2.5 sm:w-3 h-2.5 sm:h-3 text-slate-400" />
+                <span>Participant</span>
               </div>
             )}
           </div>
