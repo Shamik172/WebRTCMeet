@@ -116,12 +116,14 @@ export const RoomProvider = ({ children }) => {
       showToast(`${user?.name || 'Someone'} joined the meeting`, 'info');
     });
 
-    // 7. Remote peer left
-    newSocket.on('user-left', ({ socketId }) => {
-      console.log('[🚪 LEFT] User disconnected:', socketId);
+    // 7. Remote peer left (with role-aware notification toast)
+    newSocket.on('user-left', ({ socketId, name, isHost: wasHost, isCoHost: wasCoHost }) => {
+      console.log(`[🚪 LEFT] User left: ${name} (${socketId})`);
       setParticipants((prev) => prev.filter((p) => (p.socketId || p.id || p.peerId) !== socketId));
       setWaitingUsers((prev) => prev.filter((u) => (u.socketId || u.id || u.peerId) !== socketId));
-      showToast('A participant left the meeting', 'info');
+
+      const rolePrefix = wasHost ? '👑 ' : wasCoHost ? '🛡️ ' : '👤 ';
+      showToast(`${rolePrefix}${name || 'Someone'} left the meeting`, 'info');
     });
 
     // 8. Host role migration

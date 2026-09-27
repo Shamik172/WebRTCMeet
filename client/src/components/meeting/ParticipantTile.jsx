@@ -8,11 +8,12 @@
  * 2. Mirrors local preview while rendering remote feeds in standard orientation.
  * 3. Shows glowing speaking halo when active audio packets are detected.
  * 4. Displays avatar fallback when video is off, with role badges (Host/Co-host).
+ * 5. Provides dual hardware status chips (Mic & Camera) in the top glass bar.
  * ============================================================================
  */
 
 import React, { useRef, useEffect } from 'react';
-import { Mic, MicOff, Crown, Shield, User } from 'lucide-react';
+import { Mic, MicOff, Video, VideoOff, Crown, Shield, User } from 'lucide-react';
 
 export const ParticipantTile = ({
   peerId,
@@ -35,7 +36,7 @@ export const ParticipantTile = ({
         console.warn(`[🎥 TILE] Autoplay deferred for ${name}:`, err);
       });
     }
-  }, [stream, isVideoOff]);
+  }, [stream, isVideoOff, name]);
 
   // Extract up to 2 initials for the avatar
   const initials = name
@@ -115,23 +116,43 @@ export const ParticipantTile = ({
             )}
           </div>
 
-          {/* Mic State Chip */}
-          <div
-            className={`p-1 sm:p-1.5 rounded-lg sm:rounded-xl border backdrop-blur-xl transition-all ${
-              isMuted
-                ? 'bg-rose-500/20 border-rose-500/40 text-rose-400'
-                : 'bg-black/50 border-white/10 text-emerald-400'
-            }`}
-          >
-            {isMuted ? (
-              <MicOff className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
-            ) : (
-              <span className="flex items-center gap-0.5 h-3 sm:h-3.5 px-0.5">
-                <span className="w-0.5 sm:w-1 bg-emerald-400 rounded-full h-1.5 sm:h-2 animate-pulse" />
-                <span className="w-0.5 sm:w-1 bg-cyan-400 rounded-full h-2.5 sm:h-3 animate-pulse delay-75" />
-                <span className="w-0.5 sm:w-1 bg-emerald-400 rounded-full h-1 sm:h-1.5 animate-pulse delay-150" />
-              </span>
-            )}
+          {/* Hardware Status Chips (Mic & Camera) */}
+          <div className="flex items-center gap-1.5">
+            {/* Cam State Chip */}
+            <div
+              className={`p-1 sm:p-1.5 rounded-lg sm:rounded-xl border backdrop-blur-xl transition-all ${
+                isVideoOff
+                  ? 'bg-slate-900/80 border-white/10 text-slate-500'
+                  : 'bg-black/50 border-cyan-400/30 text-cyan-400'
+              }`}
+              title={isVideoOff ? 'Camera Off' : 'Camera On'}
+            >
+              {isVideoOff ? (
+                <VideoOff className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
+              ) : (
+                <Video className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
+              )}
+            </div>
+
+            {/* Mic State Chip */}
+            <div
+              className={`p-1 sm:p-1.5 rounded-lg sm:rounded-xl border backdrop-blur-xl transition-all ${
+                isMuted
+                  ? 'bg-rose-500/20 border-rose-500/40 text-rose-400'
+                  : 'bg-black/50 border-white/10 text-emerald-400'
+              }`}
+              title={isMuted ? 'Muted' : 'Microphone Active'}
+            >
+              {isMuted ? (
+                <MicOff className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
+              ) : (
+                <span className="flex items-center gap-0.5 h-3 sm:h-3.5 px-0.5">
+                  <span className="w-0.5 sm:w-1 bg-emerald-400 rounded-full h-1.5 sm:h-2 animate-pulse" />
+                  <span className="w-0.5 sm:w-1 bg-cyan-400 rounded-full h-2.5 sm:h-3 animate-pulse delay-75" />
+                  <span className="w-0.5 sm:w-1 bg-emerald-400 rounded-full h-1 sm:h-1.5 animate-pulse delay-150" />
+                </span>
+              )}
+            </div>
           </div>
         </div>
 

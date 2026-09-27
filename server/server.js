@@ -324,12 +324,25 @@ function handleUserExit(socket, roomId) {
   if (!rooms.has(roomId)) return;
   const room = rooms.get(roomId);
 
+  // Retrieve user metadata before deleting
+  const existingUser = room.participants.get(socket.id);
+  const userName = existingUser?.name || 'A participant';
+  const isHost = Boolean(existingUser?.isHost);
+  const isCoHost = Boolean(existingUser?.isCoHost);
+
   room.participants.delete(socket.id);
   room.waitingRoom.delete(socket.id);
   socket.leave(roomId);
 
-  io.to(roomId).emit('user-left', { socketId: socket.id });
+  // Broadcast enriched departure event to all remaining participants
+  io.to(roomId).emit('user-left', {
+    socketId: socket.id,
+    name: userName,
+    isHost,
+    isCoHost,
+  });
 
+  // Reassign primary host if the departing user held the primary host seat
   if (room.primaryHostSocketId === socket.id) {
     const nextAnchor = room.participants.keys().next().value;
     if (nextAnchor) {
@@ -340,6 +353,7 @@ function handleUserExit(socket, roomId) {
         nextUser.isCoHost = false;
       }
       io.to(roomId).emit('host-changed', { newHostId: nextAnchor });
+      console.log(`[⚓ ANCHOR] Host seat migrated to: ${nextAnchor}`);
     } else {
       rooms.delete(roomId);
       console.log(`[🗑️ PURGE] Room ${roomId} removed`);
