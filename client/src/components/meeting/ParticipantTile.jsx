@@ -5,14 +5,13 @@
  * 
  * CORE RESPONSIBILITIES:
  * 1. Binds live MediaStream track to an auto-playing HTML5 <video> element.
- * 2. Mirrors local preview while rendering remote feeds in standard orientation.
- * 3. Shows glowing speaking halo when active audio packets are detected.
- * 4. Displays avatar fallback when video is off, with role badges (Host/Co-host).
- * 5. Provides dual hardware status chips (Mic & Camera) in the top glass bar.
+ * 2. [HARDWARE_TRACK_HOTSWAP]: Wakes up the HTML5 video element decoder when
+ *    remote packets resume via 'unmute' and 'loadedmetadata' listeners.
+ * 3. Shows avatar fallback cleanly when video is toggled off.
  * ============================================================================
  */
 
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useState } from 'react';
 import { Mic, MicOff, Video, VideoOff, Crown, Shield, User } from 'lucide-react';
 
 export const ParticipantTile = ({
@@ -27,18 +26,108 @@ export const ParticipantTile = ({
   isSpeaking = false,
 }) => {
   const videoRef = useRef(null);
+  const [hasActiveVideo, setHasActiveVideo] = useState(false);
 
-  // Bind stream to video element
+  /**
+   * [HARDWARE_TRACK_HOTSWAP]: Stream binding & decoder wakeup
+   */
   useEffect(() => {
-    if (videoRef.current && stream) {
-      videoRef.current.srcObject = stream;
-      videoRef.current.play().catch((err) => {
-        console.warn(`[🎥 TILE] Autoplay deferred for ${name}:`, err);
-      });
-    }
-  }, [stream, isVideoOff, name]);
+    const videoEl = videoRef.current;
+    if (!videoEl) return;
 
-  // Extract up to 2 initials for the avatar
+    if (!stream) {
+      if (videoEl.srcObject) {
+        videoEl.srcObject = null;
+      }
+      setHasActiveVideo(false);
+      return;
+    }
+
+    if (videoEl.srcObject !== stream) {
+      console.log(`[🎥 TILE] [HARDWARE_TRACK_HOTSWAP] Binding stream to video element for ${name} (${peerId})`);
+      videoEl.srcObject = stream;
+    }
+
+    const checkTrackState = () => {
+      const videoTracks = stream.getVideoTracks();
+      const track = videoTracks[0];
+      const hasTrack = Boolean(track && track.readyState === 'live');
+      setHasActiveVideo(hasTrack);
+    };
+
+    checkTrackState();
+
+    const triggerPlay = () => {
+      if (videoEl && !isVideoOff) {
+        const playPromise = videoEl.play();
+        if (playPromise !== undefined) {
+          playPromise
+            .then(() => {
+              console.log(`[🎥 TILE] [HARDWARE_TRACK_HOTSWAP] Video playback running for ${name}`);
+              setHasActiveVideo(true);
+            })
+            .catch((err) => {
+              if (err.name === 'AbortError') return;
+              console.warn(`[🎥 TILE] [HARDWARE_TRACK_HOTSWAP] Autoplay blocked for ${name}:`, err);
+              if (!isLocal && !videoEl.muted) {
+                videoEl.muted = true;
+                videoEl.play().catch(() => {});
+              }
+            });
+        }
+      }
+    };
+
+    triggerPlay();
+
+    // Inbound track listeners
+    const handleAddTrack = () => {
+      checkTrackState();
+      triggerPlay();
+    };
+
+    const handleRemoveTrack = () => {
+      checkTrackState();
+    };
+
+    stream.addEventListener('addtrack', handleAddTrack);
+    stream.addEventListener('removetrack', handleRemoveTrack);
+
+    const videoTracks = stream.getVideoTracks();
+    const trackListeners = [];
+
+    videoTracks.forEach((track) => {
+      const onUnmute = () => {
+        console.log(`[🎥 TILE] [HARDWARE_TRACK_HOTSWAP] Inbound video frames resumed for ${name}!`);
+        setHasActiveVideo(true);
+        triggerPlay();
+      };
+      const onMute = () => {
+        console.log(`[🎥 TILE] [HARDWARE_TRACK_HOTSWAP] Video paused/muted for ${name}`);
+      };
+      const onEnded = () => {
+        setHasActiveVideo(false);
+      };
+
+      track.addEventListener('unmute', onUnmute);
+      track.addEventListener('mute', onMute);
+      track.addEventListener('ended', onEnded);
+
+      trackListeners.push({ track, onUnmute, onMute, onEnded });
+    });
+
+    return () => {
+      stream.removeEventListener('addtrack', handleAddTrack);
+      stream.removeEventListener('removetrack', handleRemoveTrack);
+      trackListeners.forEach(({ track, onUnmute, onMute, onEnded }) => {
+        track.removeEventListener('unmute', onUnmute);
+        track.removeEventListener('mute', onMute);
+        track.removeEventListener('ended', onEnded);
+      });
+    };
+  }, [stream, isVideoOff, name, peerId, isLocal]);
+
+  // Extract up to 2 initials for avatar
   const initials = name
     .trim()
     .split(' ')
@@ -46,6 +135,11 @@ export const ParticipantTile = ({
     .slice(0, 2)
     .map((n) => n[0].toUpperCase())
     .join('') || 'U';
+
+  // Video is visible ONLY when:
+  // 1. Signaling indicates the user has video on (!isVideoOff)
+  // 2. Stream has video track attached AND active
+  const showVideo = !isVideoOff && Boolean(stream && stream.getVideoTracks().length > 0 && (isLocal || hasActiveVideo));
 
   return (
     <div
@@ -55,7 +149,6 @@ export const ParticipantTile = ({
           : 'bg-gradient-to-b from-white/20 via-white/5 to-transparent border border-white/10 shadow-[0_12px_32px_rgba(0,0,0,0.5)]'
       }`}
     >
-      {/* Specular Inner Container */}
       <div className="relative w-full h-full rounded-[21px] sm:rounded-[23px] overflow-hidden bg-slate-950/60 backdrop-blur-2xl flex items-center justify-center">
         
         {/* Video Element */}
@@ -63,17 +156,17 @@ export const ParticipantTile = ({
           ref={videoRef}
           autoPlay
           playsInline
-          muted={isLocal} // Avoid local audio feedback loop
+          muted={isLocal}
           className={`w-full h-full object-cover transition-opacity duration-300 ${
             isLocal ? 'transform -scale-x-100' : ''
-          } ${isVideoOff || !stream ? 'opacity-0' : 'opacity-100'}`}
+          } ${showVideo ? 'opacity-100' : 'opacity-0'}`}
         />
 
         {/* Ambient Darkened Gradient Vignettes */}
         <div className="absolute inset-0 pointer-events-none bg-gradient-to-t from-black/80 via-transparent to-black/30" />
 
         {/* Avatar Placeholder when Camera is Off */}
-        {(isVideoOff || !stream) && (
+        {!showVideo && (
           <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-950/40 backdrop-blur-md p-3 text-center">
             <div className="relative">
               <div
@@ -92,9 +185,8 @@ export const ParticipantTile = ({
           </div>
         )}
 
-        {/* Top Floating Glass Bar: Role Identification & Live Status */}
+        {/* Top Floating Glass Bar */}
         <div className="absolute top-2 sm:top-2.5 inset-x-2 sm:inset-x-2.5 flex items-center justify-between z-10 pointer-events-none">
-          {/* Roles */}
           <div className="flex items-center gap-1">
             {isHost && (
               <div className="px-1.5 sm:px-2 py-0.5 rounded-lg bg-amber-500/20 border border-amber-500/40 text-amber-300 flex items-center gap-1 text-[9px] sm:text-[10px] font-semibold backdrop-blur-xl shadow-sm">
@@ -116,7 +208,6 @@ export const ParticipantTile = ({
             )}
           </div>
 
-          {/* Hardware Status Chips (Mic & Camera) */}
           <div className="flex items-center gap-1.5">
             {/* Cam State Chip */}
             <div

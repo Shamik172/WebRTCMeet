@@ -4,15 +4,17 @@
  * PURPOSE: Full In-Call Meeting View (VisionOS Glassmorphism)
  * 
  * CORE RESPONSIBILITIES:
- * 1. Calls original useWebRTCMesh(socket, localStream) without breaking its signature.
- * 2. Bridges incoming socket signaling events directly to mesh hook handlers.
- * 3. Builds remote peer tiles from RoomContext participants + remoteStreams Map.
- * 4. Mounts MeetingGrid, ControlDock, ChatDrawer, ParticipantsDrawer, and ReactionOverlay.
- * 5. Provides dual quick-action waiting room banner (Admit & Decline) for Host & Co-Hosts.
+ * 1. Bridges useMediaStream with useWebRTCMesh.
+ * 2. [HARDWARE_TRACK_HOTSWAP]: Intercepts mic & video toggles to call
+ *    replaceSenderTrack across all active peer transceivers whenever hardware
+ *    is acquired or stopped.
+ * 3. Bridges incoming socket signaling events directly to mesh hook handlers.
+ * 4. Builds remote peer tiles from RoomContext participants + remoteStreams Map.
+ * 5. Mounts MeetingGrid, ControlDock, ChatDrawer, ParticipantsDrawer, ReactionOverlay.
  * ============================================================================
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useRoom } from '../context/RoomContext';
 import { useWebRTCMesh } from '../hooks/useWebRTCMesh';
 import { useScreenShare } from '../hooks/useScreenShare';
@@ -29,8 +31,8 @@ export const MeetingPage = ({ mediaStreamState }) => {
     isAudioMuted,
     isVideoOff,
     hasCamHardware,
-    toggleAudio,
-    toggleVideo,
+    toggleAudio: baseToggleAudio,
+    toggleVideo: baseToggleVideo,
   } = mediaStreamState;
 
   const {
@@ -50,21 +52,23 @@ export const MeetingPage = ({ mediaStreamState }) => {
     showToast,
   } = useRoom();
 
-  const [activePanel, setActivePanel] = useState(null); // 'chat' | 'people' | null
+  const [activePanel, setActivePanel] = useState(null);
   const [unreadCount, setUnreadCount] = useState(0);
   const [copiedMeetingId, setCopiedMeetingId] = useState(false);
 
-  // 1. Broadcast mic & cam hardware changes to remote peers
+  // 1. Broadcast mic & cam hardware changes to remote peers via signaling
   useEffect(() => {
     if (broadcastMediaState) {
+      console.log(`[📡 SIGNAL] Broadcasting media state: AudioMuted=${isAudioMuted}, VideoOff=${isVideoOff}`);
       broadcastMediaState(isAudioMuted, isVideoOff);
     }
   }, [isAudioMuted, isVideoOff, broadcastMediaState]);
 
-  // 2. Call original useWebRTCMesh with positional arguments
+  // 2. Instantiate WebRTC Mesh manager with replaceSenderTrack capability
   const {
     remoteStreams,
     peerConnectionsRef,
+    replaceSenderTrack,
     initiateCall,
     handleOffer,
     handleAnswer,
@@ -72,13 +76,36 @@ export const MeetingPage = ({ mediaStreamState }) => {
     removePeer,
   } = useWebRTCMesh(socket, localStream);
 
+  /**
+   * [HARDWARE_TRACK_HOTSWAP]: Wrapped Toggle Audio
+   * Stops OS track or gets fresh track, then updates all WebRTC transceivers.
+   */
+  const handleToggleAudio = useCallback(async () => {
+    console.log('[🎙️ AUDIO] [HARDWARE_TRACK_HOTSWAP] Triggering audio toggle...');
+    const track = await baseToggleAudio();
+    // track is null on mute, or a fresh MediaStreamTrack on unmute
+    await replaceSenderTrack('audio', track);
+  }, [baseToggleAudio, replaceSenderTrack]);
+
+  /**
+   * [HARDWARE_TRACK_HOTSWAP]: Wrapped Toggle Video
+   * Stops OS camera LED or gets fresh track, then updates all WebRTC transceivers.
+   */
+  const handleToggleVideo = useCallback(async () => {
+    console.log('[📷 VIDEO] [HARDWARE_TRACK_HOTSWAP] Triggering video toggle...');
+    const track = await baseToggleVideo();
+    // track is null when turning off, or a fresh MediaStreamTrack when turning on
+    if (typeof replaceSenderTrack === 'function') {
+      await replaceSenderTrack('video', track);
+    }
+  }, [baseToggleVideo, replaceSenderTrack]);
+
   // 3. Connect socket signaling events to hook handlers
   useEffect(() => {
     if (!socket) return;
 
     const onUserJoined = ({ user }) => {
       const targetId = user?.socketId || user?.id || user?.peerId;
-      // Do not initiate a WebRTC call to yourself!
       if (targetId && targetId !== socket.id) {
         console.log(`[👋 PEER] Initiating WebRTC call to joined user: ${targetId}`);
         initiateCall(targetId);
@@ -118,15 +145,8 @@ export const MeetingPage = ({ mediaStreamState }) => {
 
   // 4. Hot-swap video track for screen presentation across active mesh connections
   const handleTrackReplace = (newTrack) => {
-    if (!peerConnectionsRef?.current) return;
-    Object.values(peerConnectionsRef.current).forEach((pc) => {
-      const videoSender = pc.getSenders().find((s) => s.track && s.track.kind === 'video');
-      if (videoSender && newTrack) {
-        videoSender.replaceTrack(newTrack).catch((err) => {
-          console.error('[💥 ERROR] Track replace failed:', err);
-        });
-      }
-    });
+    console.log('[🖥️ SCREEN] [HARDWARE_TRACK_HOTSWAP] Hot-swapping screen share track...');
+    replaceSenderTrack('video', newTrack);
   };
 
   const { isScreenSharing, toggleScreenShare } = useScreenShare({
@@ -253,7 +273,7 @@ export const MeetingPage = ({ mediaStreamState }) => {
         </div>
       </header>
 
-      {/* Grid Canvas: Isolated viewport taking full vertical room above dock */}
+      {/* Grid Canvas */}
       <main className="relative z-10 flex-1 w-full min-h-0 flex items-center justify-center px-2 sm:px-4 lg:px-6 pt-1 pb-20 sm:pb-24">
         <MeetingGrid
           localStream={localStream}
@@ -262,6 +282,7 @@ export const MeetingPage = ({ mediaStreamState }) => {
           isVideoOff={isVideoOff}
           isHost={isHost}
           peers={remotePeers}
+          onOpenPeople={() => handleTogglePanel('people')}
         />
       </main>
 
@@ -275,8 +296,8 @@ export const MeetingPage = ({ mediaStreamState }) => {
         unreadCount={unreadCount}
         participantCount={remotePeers.length + 1}
         activePanel={activePanel}
-        toggleAudio={toggleAudio}
-        toggleVideo={toggleVideo}
+        toggleAudio={handleToggleAudio}
+        toggleVideo={handleToggleVideo}
         toggleScreenShare={toggleScreenShare}
         togglePanel={handleTogglePanel}
         onSendReaction={sendReaction}

@@ -46,8 +46,7 @@ export const RoomProvider = ({ children }) => {
   // SOCKET CONNECTION & EVENT LISTENERS
   // --------------------------------------------------------------------------
   useEffect(() => {
-    const serverUrl = import.meta.env.VITE_SIGNALING_SERVER_URL;
-    // const serverUrl = 'http://localhost:5000';
+    const serverUrl = import.meta.env.VITE_SIGNALING_SERVER_URL || 'http://localhost:5000';
     console.log('[🔌 SIGNAL] Connecting to signaling server at:', serverUrl);
 
     const newSocket = io(serverUrl, {

@@ -1,15 +1,16 @@
 /**
  * ============================================================================
  * FILE: client/src/hooks/useWebRTCMesh.js
- * PURPOSE: Full WebRTC Mesh Peer Connection Manager
+ * PURPOSE: Full WebRTC Mesh Peer Connection Manager with Transceiver Pre-allocation
+ *          and Track Hot-Swapping for Approach 2 Hardware Release.
  * 
  * CORE RESPONSIBILITIES:
  * 1. RTCPeerConnection Lifecycle: Instantiates and tracks connections for each remote peer.
- * 2. ICE Candidate Queueing: Buffers early ICE candidates until setRemoteDescription completes,
- *    preventing "Remote description is null" race condition crashes.
- * 3. SDP Negotiation: Manages createOffer, setLocalDescription, setRemoteDescription, and createAnswer cycles.
- * 4. Cleanup & DOM Sync: Completely closes peer connections and clears remote streams on peer disconnect,
- *    eliminating blank video tile artifacts.
+ * 2. Transceiver Pre-allocation: Pre-allocates bidirectional transceivers ('sendrecv')
+ *    for both audio and video upfront without duplicate receiver allocations.
+ * 3. [HARDWARE_TRACK_HOTSWAP]: Exposes `replaceSenderTrack(kind, newTrack)` to hot-swap
+ *    fresh getUserMedia tracks (or null on mute) onto transceivers without renegotiation.
+ * 4. Stable Peer Connection Ref: Prevents hook identity churn when localStream updates.
  * ============================================================================
  */
 
@@ -17,39 +18,69 @@ import { useState, useRef, useCallback } from 'react';
 import { RTC_CONFIGURATION } from '../utils/rtcConfig';
 
 export const useWebRTCMesh = (socket, localStream) => {
-  // Map of socketId -> Remote MediaStream object for rendering video tiles
   const [remoteStreams, setRemoteStreams] = useState(new Map());
-
-  // Ref holds active RTCPeerConnection objects without triggering unnecessary React re-renders
-  // Structure: peerConnections.current[socketId] = RTCPeerConnection
   const peerConnections = useRef({});
-
-  // Ref holds candidate queues for each peer to prevent ICE race conditions
-  // Structure: iceCandidateQueues.current[socketId] = Array<RTCIceCandidate>
   const iceCandidateQueues = useRef({});
+  const localStreamRef = useRef(localStream);
+
+  // Keep localStreamRef always current without triggering function re-creations
+  localStreamRef.current = localStream;
 
   /**
-   * Instantiates a new RTCPeerConnection for a remote peer.
+   * [HARDWARE_TRACK_HOTSWAP]: Accurately finds the RTCRtpTransceiver corresponding to kind ('audio' | 'video').
+   */
+  const findTransceiverByKind = (pc, kind) => {
+    const transceivers = pc.getTransceivers();
+    return transceivers.find((t) => {
+      if (t.receiver?.track?.kind === kind) return true;
+      if (t.sender?.track?.kind === kind) return true;
+      return false;
+    });
+  };
+
+  /**
+   * Instantiates a new RTCPeerConnection for a remote peer with pre-allocated transceivers.
    */
   const createPeerConnection = useCallback((targetSocketId) => {
     if (peerConnections.current[targetSocketId]) {
       return peerConnections.current[targetSocketId];
     }
 
-    console.log(`[📡 WEBRTC] Initializing RTCPeerConnection for: ${targetSocketId}`);
+    console.log(`[📡 WEBRTC] [HARDWARE_TRACK_HOTSWAP] Initializing RTCPeerConnection for: ${targetSocketId}`);
     const pc = new RTCPeerConnection(RTC_CONFIGURATION);
     peerConnections.current[targetSocketId] = pc;
     iceCandidateQueues.current[targetSocketId] = [];
 
-    // Attach local microphone and camera tracks to the peer connection
-    if (localStream) {
-      localStream.getTracks().forEach((track) => {
-        pc.addTrack(track, localStream);
-      });
-      console.log(`[📡 WEBRTC] Attached local tracks to peer: ${targetSocketId}`);
-    }
+    const currentStream = localStreamRef.current;
 
-    // ICE Candidate Discovery Event: Sends network coordinates to target peer via Socket.io
+    // Pre-allocate audio & video transceivers with direction 'sendrecv'
+    const setupTransceiver = (kind) => {
+      let transceiver = findTransceiverByKind(pc, kind);
+      const track = (kind === 'audio' 
+        ? currentStream?.getAudioTracks()[0] 
+        : currentStream?.getVideoTracks()[0]) || null;
+
+      if (!transceiver) {
+        if (track && currentStream) {
+          transceiver = pc.addTransceiver(track, { direction: 'sendrecv', streams: [currentStream] });
+          console.log(`[📡 WEBRTC] [HARDWARE_TRACK_HOTSWAP] ${kind} transceiver pre-allocated WITH active track for: ${targetSocketId}`);
+        } else {
+          transceiver = pc.addTransceiver(kind, { direction: 'sendrecv' });
+          console.log(`[📡 WEBRTC] [HARDWARE_TRACK_HOTSWAP] ${kind} transceiver pre-allocated WITHOUT track (null) for: ${targetSocketId}`);
+        }
+      } else {
+        transceiver.direction = 'sendrecv';
+        if (track) {
+          transceiver.sender.replaceTrack(track);
+          console.log(`[📡 WEBRTC] [HARDWARE_TRACK_HOTSWAP] Existing ${kind} transceiver attached to active track for: ${targetSocketId}`);
+        }
+      }
+    };
+
+    setupTransceiver('audio');
+    setupTransceiver('video');
+
+    // ICE Candidate Discovery Event
     pc.onicecandidate = (event) => {
       if (event.candidate && socket) {
         socket.emit('webrtc-ice-candidate', {
@@ -61,26 +92,78 @@ export const useWebRTCMesh = (socket, localStream) => {
 
     // Track Event: Fires when incoming media stream from remote peer is received
     pc.ontrack = (event) => {
-      console.log(`[🎥 MEDIA] Remote track received from: ${targetSocketId}`);
+      console.log(`[🎥 MEDIA] [HARDWARE_TRACK_HOTSWAP] Remote track received (${event.track.kind}) from: ${targetSocketId}`);
       const [incomingStream] = event.streams;
+
       setRemoteStreams((prevStreams) => {
         const updated = new Map(prevStreams);
-        updated.set(targetSocketId, incomingStream);
+        let streamToStore = updated.get(targetSocketId);
+
+        if (!streamToStore) {
+          streamToStore = incomingStream || new MediaStream();
+        }
+
+        if (!streamToStore.getTracks().some((t) => t.id === event.track.id)) {
+          streamToStore.addTrack(event.track);
+        }
+
+        updated.set(targetSocketId, new MediaStream(streamToStore.getTracks()));
         return updated;
       });
     };
 
     return pc;
-  }, [localStream, socket]);
+  }, [socket]);
 
   /**
-   * Empties and applies queued ICE candidates once setRemoteDescription has resolved.
+   * [HARDWARE_TRACK_HOTSWAP]: Hot-swaps tracks across all active peer connections.
    */
+  const replaceSenderTrack = useCallback(async (kind, newTrack) => {
+    const pcEntries = Object.entries(peerConnections.current);
+    console.log(`[🔄 HOTSWAP] [HARDWARE_TRACK_HOTSWAP] Replacing ${kind} track across ${pcEntries.length} peer connection(s)...`);
+
+    for (const [peerId, pc] of pcEntries) {
+      if (pc.connectionState === 'closed') continue;
+
+      const transceiver = findTransceiverByKind(pc, kind);
+
+      if (transceiver && transceiver.sender) {
+        try {
+          if (newTrack && newTrack.kind !== kind) {
+            console.error(`[💥 ERROR] [HARDWARE_TRACK_HOTSWAP] Track kind mismatch! Expected ${kind}, got ${newTrack.kind}`);
+            continue;
+          }
+
+          // Ensure transceiver is in sendrecv mode
+          if (transceiver.direction !== 'sendrecv') {
+            transceiver.direction = 'sendrecv';
+          }
+
+          if (newTrack) {
+            newTrack.enabled = true;
+          }
+
+          await transceiver.sender.replaceTrack(newTrack);
+          console.log(`[✅ HOTSWAP] [HARDWARE_TRACK_HOTSWAP] Successfully called replaceTrack on transceiver for peer: ${peerId} (kind=${kind})`);
+        } catch (err) {
+          console.error(`[💥 ERROR] [HARDWARE_TRACK_HOTSWAP] Transceiver replaceTrack failed for peer ${peerId} (kind=${kind}):`, err);
+        }
+      } else {
+        const sender = pc.getSenders().find((s) => s.track?.kind === kind);
+        if (sender) {
+          try {
+            await sender.replaceTrack(newTrack);
+            console.log(`[✅ HOTSWAP] [HARDWARE_TRACK_HOTSWAP] Fallback sender.replaceTrack succeeded for peer: ${peerId} (kind=${kind})`);
+          } catch (err) {
+            console.error(`[💥 ERROR] [HARDWARE_TRACK_HOTSWAP] Fallback sender.replaceTrack failed for peer ${peerId}:`, err);
+          }
+        }
+      }
+    }
+  }, []);
+
   const processIceQueue = async (targetSocketId, pc) => {
     const queue = iceCandidateQueues.current[targetSocketId] || [];
-    if (queue.length > 0) {
-      console.log(`[🧊 ICE-QUEUE] Flushing ${queue.length} buffered candidates for: ${targetSocketId}`);
-    }
     while (queue.length > 0) {
       const candidate = queue.shift();
       try {
@@ -91,9 +174,6 @@ export const useWebRTCMesh = (socket, localStream) => {
     }
   };
 
-  /**
-   * Caller Flow: Initiates call by creating SDP Offer and emitting to target peer.
-   */
   const initiateCall = useCallback(async (targetSocketId) => {
     try {
       console.log(`[📡 WEBRTC] Creating SDP Offer for: ${targetSocketId}`);
@@ -111,9 +191,6 @@ export const useWebRTCMesh = (socket, localStream) => {
     }
   }, [createPeerConnection, socket]);
 
-  /**
-   * Receiver Flow: Handles incoming SDP Offer and returns SDP Answer.
-   */
   const handleOffer = useCallback(async (callerSocketId, offer) => {
     try {
       console.log(`[📡 WEBRTC] Handling incoming Offer from: ${callerSocketId}`);
@@ -121,6 +198,10 @@ export const useWebRTCMesh = (socket, localStream) => {
 
       await pc.setRemoteDescription(new RTCSessionDescription(offer));
       await processIceQueue(callerSocketId, pc);
+
+      pc.getTransceivers().forEach((transceiver) => {
+        transceiver.direction = 'sendrecv';
+      });
 
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
@@ -134,9 +215,6 @@ export const useWebRTCMesh = (socket, localStream) => {
     }
   }, [createPeerConnection, socket]);
 
-  /**
-   * Caller Flow: Applies incoming SDP Answer from responder.
-   */
   const handleAnswer = useCallback(async (responderSocketId, answer) => {
     try {
       console.log(`[📡 WEBRTC] Handling incoming Answer from: ${responderSocketId}`);
@@ -150,9 +228,6 @@ export const useWebRTCMesh = (socket, localStream) => {
     }
   }, []);
 
-  /**
-   * ICE Handler: Queues candidates if remote description is missing, applies immediately if present.
-   */
   const handleIceCandidate = useCallback(async (senderSocketId, candidate) => {
     const pc = peerConnections.current[senderSocketId];
 
@@ -163,7 +238,6 @@ export const useWebRTCMesh = (socket, localStream) => {
         console.error(`[💥 ERROR] Failed to add direct ICE candidate for ${senderSocketId}:`, err);
       }
     } else {
-      console.log(`[🧊 ICE-QUEUE] Remote description pending. Buffering candidate for: ${senderSocketId}`);
       if (!iceCandidateQueues.current[senderSocketId]) {
         iceCandidateQueues.current[senderSocketId] = [];
       }
@@ -171,9 +245,6 @@ export const useWebRTCMesh = (socket, localStream) => {
     }
   }, []);
 
-  /**
-   * Disconnect Cleanup: Teardown RTCPeerConnection and remove stream from React state.
-   */
   const removePeer = useCallback((socketId) => {
     console.log(`[🧹 CLEANUP] Closing connection and removing stream for: ${socketId}`);
     const pc = peerConnections.current[socketId];
@@ -195,6 +266,7 @@ export const useWebRTCMesh = (socket, localStream) => {
   return {
     remoteStreams,
     peerConnectionsRef: peerConnections,
+    replaceSenderTrack,
     initiateCall,
     handleOffer,
     handleAnswer,
